@@ -108,6 +108,19 @@ class ServerProcessor:
       return final_data
 
     def __init__(self, c, online_asr_proc, min_chunk):
+        """
+        Initialize the ServerProcessor for a client connection and prepare language/reporting and filtering state.
+        
+        Parameters:
+            c (Connection): Wrapper for the client socket connection.
+            online_asr_proc: Online ASR processor instance used to feed audio and obtain transcripts.
+            min_chunk (float|int): Minimum audio chunk length to accumulate before processing.
+        
+        Details:
+            - Initializes internal state used to track segment boundaries and first-chunk behavior.
+            - Reorders configured report languages to place English ('en') first as the primary source for translation.
+            - Loads subtitle filter strings from the configured filter file, if provided.
+        """
         self.connection = c
         self.online_asr_proc = online_asr_proc
         self.min_chunk = min_chunk
@@ -126,7 +139,14 @@ class ServerProcessor:
             self.load_filters(args.filter_file)
 
     def load_filters(self, filter_file_path):
-        """Load filter strings from a JSON file."""
+        """
+        Load filter strings from a JSON file and store them on self.filters.
+        
+        If the file exists and contains valid JSON, sets self.filters to the list found at the top-level "filters" key (or to an empty list if that key is absent). If the file does not exist or cannot be parsed, leaves self.filters unchanged and logs an appropriate warning or error.
+        
+        Parameters:
+            filter_file_path (str): Path to the JSON file that contains a top-level "filters" array.
+        """
         try:
             if os.path.isfile(filter_file_path):
                 with open(filter_file_path, 'r', encoding='utf-8') as f:
@@ -141,7 +161,15 @@ class ServerProcessor:
             logger.error(f"Error loading filter file {filter_file_path}: {e}")
 
     def should_filter_text(self, text):
-        """Check if text contains any filter strings."""
+        """
+        Return whether the provided text contains any configured filter substring (case-insensitive).
+        
+        Parameters:
+            text (str): Text to check for filtered substrings.
+        
+        Returns:
+            bool: `True` if any configured filter string is found in the text, `False` otherwise.
+        """
         if not self.filters:
             return False
 
@@ -152,6 +180,14 @@ class ServerProcessor:
         return False
 
     def receive_audio_chunk(self):
+        """
+        Collect available audio frames from the connection until at least the configured minimum duration is gathered or the connection closes.
+        
+        This method accumulates incoming mono PCM audio from the client and concatenates received fragments. On the very first successful call it enforces the minimum-duration requirement and will return None if the collected audio is shorter than the configured minimum. The method also updates the processor's first-chunk state.
+        
+        Returns:
+            numpy.ndarray: A 1-D float32 array of concatenated mono audio samples at the configured sampling rate, or `None` if no sufficient audio was received.
+        """
         global running
         # receive all audio that is available by this time
         # blocks operation if less than self.min_chunk seconds is available
@@ -203,6 +239,15 @@ class ServerProcessor:
             return None
 
     def send_result(self, o, id):
+        """
+        Format an ASR result into one or more subtitle messages and send them to the connected client, optionally translating into configured report languages and applying text filters.
+        
+        If a filter file is configured and the original or translated text matches any filter string, that subtitle is not sent. When translation is enabled, the function sends the original-language subtitle first (if not filtered), then sends translations for each language in the processor's report_languages list (skipping the source language). When English appears among report languages, it is used as a fallback source for subsequent translations and its text is scrubbed of non-English characters before further translation. All sent messages are serialized as JSON and delivered via the connection; significant actions are logged using the client `id`.
+        
+        Parameters:
+            o: ASR output object (dict-like) containing at minimum timing and text fields used to build the subtitle message.
+            id: int identifying the client/connection for logging purposes.
+        """
         msg = self.format_output_transcript(o, args.source_language)
         if msg is not None and (source_stream == None or source_stream == 'none'):
             # Check if text should be filtered
