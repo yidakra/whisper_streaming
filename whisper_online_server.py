@@ -256,7 +256,7 @@ class ServerProcessor:
             id: int identifying the client/connection for logging purposes.
         """
         msg = self.format_output_transcript(o, args.source_language)
-        if msg is not None and (source_stream == None or source_stream == 'none'):
+        if msg is not None and (source_stream is None or source_stream == 'none'):
             # Check if text should be filtered
             if self.should_filter_text(msg['text']):
                 logger.info("%i) (%s) %s -> %s [FILTERED] %s" % ( id, msg['language'], self.timedelta_to_webvtt(str(datetime.timedelta(seconds=float(msg['start'])))) ,  self.timedelta_to_webvtt(str(datetime.timedelta(seconds=float(msg['end'])))), msg['text']))
