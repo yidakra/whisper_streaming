@@ -33,6 +33,8 @@ parser.add_argument("--report-languages", type=str, default='en', dest="report_l
 parser.add_argument("--source-language", type=str, default='en', dest="source_language")
 parser.add_argument("--translate-host", type=str, default=None, dest="translate_host")
 parser.add_argument("--translate-port", type=int, default=5000, dest="translate_port")
+parser.add_argument("--filter-file", type=str, default=None, dest="filter_file",
+        help="Path to a JSON file containing strings to filter from subtitles. Subtitles containing any of these strings will not be streamed.")
 
 # options from whisper_online
 add_shared_args(parser)
@@ -118,6 +120,37 @@ class ServerProcessor:
         self.report_languages = args.report_languages.split(',')
         self.report_languages.insert(0, self.report_languages.pop(self.report_languages.index('en')))
 
+        # Load subtitle filters if filter file is provided
+        self.filters = []
+        if args.filter_file:
+            self.load_filters(args.filter_file)
+
+    def load_filters(self, filter_file_path):
+        """Load filter strings from a JSON file."""
+        try:
+            if os.path.isfile(filter_file_path):
+                with open(filter_file_path, 'r', encoding='utf-8') as f:
+                    filter_data = json.load(f)
+                    self.filters = filter_data.get('filters', [])
+                    logger.info(f"Loaded {len(self.filters)} filter strings from {filter_file_path}")
+            else:
+                logger.warning(f"Filter file not found: {filter_file_path}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in filter file {filter_file_path}: {e}")
+        except Exception as e:
+            logger.error(f"Error loading filter file {filter_file_path}: {e}")
+
+    def should_filter_text(self, text):
+        """Check if text contains any filter strings."""
+        if not self.filters:
+            return False
+
+        text_lower = text.lower()
+        for filter_string in self.filters:
+            if filter_string.lower() in text_lower:
+                return True
+        return False
+
     def receive_audio_chunk(self):
         global running
         # receive all audio that is available by this time
@@ -172,6 +205,11 @@ class ServerProcessor:
     def send_result(self, o, id):
         msg = self.format_output_transcript(o, args.source_language)
         if msg is not None and (source_stream == None or source_stream == 'none'):
+            # Check if text should be filtered
+            if self.should_filter_text(msg['text']):
+                logger.info("%i) (%s) %s -> %s [FILTERED] %s" % ( id, msg['language'], self.timedelta_to_webvtt(str(datetime.timedelta(seconds=float(msg['start'])))) ,  self.timedelta_to_webvtt(str(datetime.timedelta(seconds=float(msg['end'])))), msg['text']))
+                return  # Skip sending this subtitle
+
             logger.info("%i) (%s) %s -> %s %s" % ( id, msg['language'], self.timedelta_to_webvtt(str(datetime.timedelta(seconds=float(msg['start'])))) ,  self.timedelta_to_webvtt(str(datetime.timedelta(seconds=float(msg['end'])))), msg['text']))
             self.connection.send(json.dumps(msg))
 
@@ -183,9 +221,15 @@ class ServerProcessor:
                     if(report_language != args.source_language):
                         msg['language'] = report_language
                         msg['text'] = self.translate_text(id, org_txt, source_language, msg['language'])
+
+                        # Check if translated text should be filtered
+                        if self.should_filter_text(msg['text']):
+                            logger.info("%i) (%s) %s -> %s [FILTERED] %s" % ( id, msg['language'],  self.timedelta_to_webvtt(str(datetime.timedelta(seconds=float(msg['start'])))) ,  self.timedelta_to_webvtt(str(datetime.timedelta(seconds=float(msg['end'])))), msg['text']))
+                            continue  # Skip sending this translated subtitle
+
                         self.connection.send(json.dumps(msg))
                         if(report_language == 'en'):
-                            #switch to translation to english, for non-english to non-english, going to english works 
+                            #switch to translation to english, for non-english to non-english, going to english works
                             source_language = 'en'
                             msg['text'] = self.remove_non_english_chars(msg['text'])
                             org_txt = msg['text']
