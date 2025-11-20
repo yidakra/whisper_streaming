@@ -141,9 +141,9 @@ class ServerProcessor:
     def load_filters(self, filter_file_path):
         """
         Load filter strings from a JSON file and store them on self.filters.
-        
+
         If the file exists and contains valid JSON, sets self.filters to the list found at the top-level "filters" key (or to an empty list if that key is absent). If the file does not exist or cannot be parsed, leaves self.filters unchanged and logs an appropriate warning or error.
-        
+
         Parameters:
             filter_file_path (str): Path to the JSON file that contains a top-level "filters" array.
         """
@@ -151,14 +151,21 @@ class ServerProcessor:
             if os.path.isfile(filter_file_path):
                 with open(filter_file_path, 'r', encoding='utf-8') as f:
                     filter_data = json.load(f)
-                    self.filters = filter_data.get('filters', [])
+                    filters = filter_data.get('filters', [])
+
+                    # Validate and coerce filters to strings only
+                    if not isinstance(filters, list):
+                        logger.error(f"Filter file {filter_file_path}: 'filters' must be a list, got {type(filters).__name__}")
+                        return
+
+                    self.filters = [str(f) for f in filters if f]  # Convert to strings and filter out empty values
                     logger.info(f"Loaded {len(self.filters)} filter strings from {filter_file_path}")
             else:
                 logger.warning(f"Filter file not found: {filter_file_path}")
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in filter file {filter_file_path}: {e}")
-        except Exception as e:
-            logger.error(f"Error loading filter file {filter_file_path}: {e}")
+        except json.JSONDecodeError:
+            logger.exception(f"Invalid JSON in filter file {filter_file_path}")
+        except OSError:
+            logger.exception(f"Error reading filter file {filter_file_path}")
 
     def should_filter_text(self, text):
         """
