@@ -43,13 +43,53 @@ args = parser.parse_args()
 set_logging(args,logger,other="")
 
 running=True
-# setting whisper object by args 
+# setting whisper object by args
 
 SAMPLING_RATE = args.sampling_rate
 size = args.model
 language = args.lan
 min_chunk = args.min_chunk_size
 
+# Load subtitle filters globally (once) to avoid repeated disk I/O per connection
+def load_global_filters(filter_file_path):
+    """
+    Load filter strings from a JSON file globally (shared across all connections).
+
+    Filters are pre-lowercased for performance and stored as a list of strings.
+    Returns an empty list if the file doesn't exist or cannot be parsed.
+
+    Parameters:
+        filter_file_path (str): Path to the JSON file that contains a top-level "filters" array.
+
+    Returns:
+        list[str]: List of lowercase filter strings, or empty list on error.
+    """
+    try:
+        if os.path.isfile(filter_file_path):
+            with open(filter_file_path, 'r', encoding='utf-8') as f:
+                filter_data = json.load(f)
+                filters = filter_data.get('filters', [])
+
+                # Validate and coerce filters to strings only
+                if not isinstance(filters, list):
+                    logger.error(f"Filter file {filter_file_path}: 'filters' must be a list, got {type(filters).__name__}")
+                    return []
+
+                # Convert to lowercase strings and filter out empty values
+                lowercase_filters = [str(f).lower() for f in filters if f]
+                logger.info(f"Loaded {len(lowercase_filters)} filter strings from {filter_file_path}")
+                return lowercase_filters
+        else:
+            logger.warning(f"Filter file not found: {filter_file_path}")
+            return []
+    except json.JSONDecodeError:
+        logger.exception(f"Invalid JSON in filter file {filter_file_path}")
+        return []
+    except OSError:
+        logger.exception(f"Error reading filter file {filter_file_path}")
+        return []
+
+GLOBAL_FILTERS = load_global_filters(args.filter_file) if args.filter_file else []
 
 ######### Server objects
 
@@ -110,16 +150,16 @@ class ServerProcessor:
     def __init__(self, c, online_asr_proc, min_chunk):
         """
         Initialize the ServerProcessor for a client connection and prepare language/reporting and filtering state.
-        
+
         Parameters:
             c (Connection): Wrapper for the client socket connection.
             online_asr_proc: Online ASR processor instance used to feed audio and obtain transcripts.
             min_chunk (float|int): Minimum audio chunk length to accumulate before processing.
-        
+
         Details:
             - Initializes internal state used to track segment boundaries and first-chunk behavior.
             - Reorders configured report languages to place English ('en') first as the primary source for translation.
-            - Loads subtitle filter strings from the configured filter file, if provided.
+            - Uses globally loaded subtitle filters (shared across all connections for performance).
         """
         self.connection = c
         self.online_asr_proc = online_asr_proc
@@ -134,47 +174,16 @@ class ServerProcessor:
         if 'en' in self.report_languages:
             self.report_languages.insert(0, self.report_languages.pop(self.report_languages.index('en')))
 
-        # Load subtitle filters if filter file is provided
-        self.filters = []
-        if args.filter_file:
-            self.load_filters(args.filter_file)
-
-    def load_filters(self, filter_file_path):
-        """
-        Load filter strings from a JSON file and store them on self.filters.
-
-        If the file exists and contains valid JSON, sets self.filters to the list found at the top-level "filters" key (or to an empty list if that key is absent). If the file does not exist or cannot be parsed, leaves self.filters unchanged and logs an appropriate warning or error.
-
-        Parameters:
-            filter_file_path (str): Path to the JSON file that contains a top-level "filters" array.
-        """
-        try:
-            if os.path.isfile(filter_file_path):
-                with open(filter_file_path, 'r', encoding='utf-8') as f:
-                    filter_data = json.load(f)
-                    filters = filter_data.get('filters', [])
-
-                    # Validate and coerce filters to strings only
-                    if not isinstance(filters, list):
-                        logger.error(f"Filter file {filter_file_path}: 'filters' must be a list, got {type(filters).__name__}")
-                        return
-
-                    self.filters = [str(f) for f in filters if f]  # Convert to strings and filter out empty values
-                    logger.info(f"Loaded {len(self.filters)} filter strings from {filter_file_path}")
-            else:
-                logger.warning(f"Filter file not found: {filter_file_path}")
-        except json.JSONDecodeError:
-            logger.exception(f"Invalid JSON in filter file {filter_file_path}")
-        except OSError:
-            logger.exception(f"Error reading filter file {filter_file_path}")
+        # Use globally loaded filters (shared across all connections)
+        self.filters = GLOBAL_FILTERS
 
     def should_filter_text(self, text):
         """
         Return whether the provided text contains any configured filter substring (case-insensitive).
-        
+
         Parameters:
             text (str): Text to check for filtered substrings.
-        
+
         Returns:
             bool: `True` if any configured filter string is found in the text, `False` otherwise.
         """
@@ -183,7 +192,8 @@ class ServerProcessor:
 
         text_lower = text.lower()
         for filter_string in self.filters:
-            if filter_string.lower() in text_lower:
+            # Filters are already pre-lowercased for performance
+            if filter_string in text_lower:
                 return True
         return False
 
