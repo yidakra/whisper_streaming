@@ -131,7 +131,8 @@ class ServerProcessor:
 
         #put english first as the main source to translate
         self.report_languages = args.report_languages.split(',')
-        self.report_languages.insert(0, self.report_languages.pop(self.report_languages.index('en')))
+        if 'en' in self.report_languages:
+            self.report_languages.insert(0, self.report_languages.pop(self.report_languages.index('en')))
 
         # Load subtitle filters if filter file is provided
         self.filters = []
