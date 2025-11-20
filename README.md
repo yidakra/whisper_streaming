@@ -33,6 +33,7 @@ It can also run in standalone mode and pull in an RTMP stream using ffmpeg
 |REPORT_LANGUAGES |   en| Languages to report back to WSE|
 |LIBRETRANSLATE_HOST | localhost| Host name of the LibreTranslate service |
 |LIBRETRANSLATE_PORT| 5000 | Port of the LibreTranslate service |
+|FILTER_FILE | (none) | Path to JSON file containing strings to filter from subtitles. Subtitles containing any of these strings will not be streamed. |
 
 ### Subtitle Filtering
 
