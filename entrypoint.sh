@@ -27,10 +27,10 @@ translate_host="${TRANSLATE_HOST:-none}"
 translate_port="${TRANSLATE_PORT:-5000}"
 filter_file="${FILTER_FILE:-}"
 
-# Build filter file argument if provided
-filter_arg=""
+# Build filter file argument if provided (using array for proper space handling)
+filter_arg=()
 if [ -n "$filter_file" ]; then
-    filter_arg="--filter-file $filter_file"
+    filter_arg=(--filter-file "$filter_file")
 fi
 
 exec python whisper_online_server.py \
@@ -52,4 +52,4 @@ exec python whisper_online_server.py \
 --warmup-file samples_jfk.wav \
 --model_cache_dir /tmp \
 --lan $language \
-$filter_arg
+"${filter_arg[@]}"
