@@ -33,6 +33,8 @@ parser.add_argument("--report-languages", type=str, default='en', dest="report_l
 parser.add_argument("--source-language", type=str, default='en', dest="source_language")
 parser.add_argument("--translate-host", type=str, default=None, dest="translate_host")
 parser.add_argument("--translate-port", type=int, default=5000, dest="translate_port")
+parser.add_argument("--filter-file", type=str, default=None, dest="filter_file",
+        help="Path to a JSON file containing strings to filter from subtitles. Subtitles containing any of these strings will not be streamed.")
 
 # options from whisper_online
 add_shared_args(parser)
@@ -41,13 +43,53 @@ args = parser.parse_args()
 set_logging(args,logger,other="")
 
 running=True
-# setting whisper object by args 
+# setting whisper object by args
 
 SAMPLING_RATE = args.sampling_rate
 size = args.model
 language = args.lan
 min_chunk = args.min_chunk_size
 
+# Load subtitle filters globally (once) to avoid repeated disk I/O per connection
+def load_global_filters(filter_file_path):
+    """
+    Load filter strings from a JSON file globally (shared across all connections).
+
+    Filters are pre-lowercased for performance and stored as a list of strings.
+    Returns an empty list if the file doesn't exist or cannot be parsed.
+
+    Parameters:
+        filter_file_path (str): Path to the JSON file that contains a top-level "filters" array.
+
+    Returns:
+        list[str]: List of lowercase filter strings, or empty list on error.
+    """
+    try:
+        if os.path.isfile(filter_file_path):
+            with open(filter_file_path, 'r', encoding='utf-8') as f:
+                filter_data = json.load(f)
+                filters = filter_data.get('filters', [])
+
+                # Validate and coerce filters to strings only
+                if not isinstance(filters, list):
+                    logger.error(f"Filter file {filter_file_path}: 'filters' must be a list, got {type(filters).__name__}")
+                    return []
+
+                # Convert to lowercase strings and filter out empty values
+                lowercase_filters = [str(f).lower() for f in filters if f]
+                logger.info(f"Loaded {len(lowercase_filters)} filter strings from {filter_file_path}")
+                return lowercase_filters
+        else:
+            logger.warning(f"Filter file not found: {filter_file_path}")
+            return []
+    except json.JSONDecodeError:
+        logger.exception(f"Invalid JSON in filter file {filter_file_path}")
+        return []
+    except OSError:
+        logger.exception(f"Error reading filter file {filter_file_path}")
+        return []
+
+GLOBAL_FILTERS = load_global_filters(args.filter_file) if args.filter_file else []
 
 ######### Server objects
 
@@ -106,6 +148,19 @@ class ServerProcessor:
       return final_data
 
     def __init__(self, c, online_asr_proc, min_chunk):
+        """
+        Initialize the ServerProcessor for a client connection and prepare language/reporting and filtering state.
+
+        Parameters:
+            c (Connection): Wrapper for the client socket connection.
+            online_asr_proc: Online ASR processor instance used to feed audio and obtain transcripts.
+            min_chunk (float|int): Minimum audio chunk length to accumulate before processing.
+
+        Details:
+            - Initializes internal state used to track segment boundaries and first-chunk behavior.
+            - Reorders configured report languages to place English ('en') first as the primary source for translation.
+            - Uses globally loaded subtitle filters (shared across all connections for performance).
+        """
         self.connection = c
         self.online_asr_proc = online_asr_proc
         self.min_chunk = min_chunk
@@ -116,9 +171,41 @@ class ServerProcessor:
 
         #put english first as the main source to translate
         self.report_languages = args.report_languages.split(',')
-        self.report_languages.insert(0, self.report_languages.pop(self.report_languages.index('en')))
+        if 'en' in self.report_languages:
+            self.report_languages.insert(0, self.report_languages.pop(self.report_languages.index('en')))
+
+        # Use globally loaded filters (shared across all connections)
+        self.filters = GLOBAL_FILTERS
+
+    def should_filter_text(self, text):
+        """
+        Return whether the provided text contains any configured filter substring (case-insensitive).
+
+        Parameters:
+            text (str): Text to check for filtered substrings.
+
+        Returns:
+            bool: `True` if any configured filter string is found in the text, `False` otherwise.
+        """
+        if not self.filters:
+            return False
+
+        text_lower = text.lower()
+        for filter_string in self.filters:
+            # Filters are already pre-lowercased for performance
+            if filter_string in text_lower:
+                return True
+        return False
 
     def receive_audio_chunk(self):
+        """
+        Collect available audio frames from the connection until at least the configured minimum duration is gathered or the connection closes.
+        
+        This method accumulates incoming mono PCM audio from the client and concatenates received fragments. On the very first successful call it enforces the minimum-duration requirement and will return None if the collected audio is shorter than the configured minimum. The method also updates the processor's first-chunk state.
+        
+        Returns:
+            numpy.ndarray: A 1-D float32 array of concatenated mono audio samples at the configured sampling rate, or `None` if no sufficient audio was received.
+        """
         global running
         # receive all audio that is available by this time
         # blocks operation if less than self.min_chunk seconds is available
@@ -170,8 +257,22 @@ class ServerProcessor:
             return None
 
     def send_result(self, o, id):
+        """
+        Format an ASR result into one or more subtitle messages and send them to the connected client, optionally translating into configured report languages and applying text filters.
+        
+        If a filter file is configured and the original or translated text matches any filter string, that subtitle is not sent. When translation is enabled, the function sends the original-language subtitle first (if not filtered), then sends translations for each language in the processor's report_languages list (skipping the source language). When English appears among report languages, it is used as a fallback source for subsequent translations and its text is scrubbed of non-English characters before further translation. All sent messages are serialized as JSON and delivered via the connection; significant actions are logged using the client `id`.
+        
+        Parameters:
+            o: ASR output object (dict-like) containing at minimum timing and text fields used to build the subtitle message.
+            id: int identifying the client/connection for logging purposes.
+        """
         msg = self.format_output_transcript(o, args.source_language)
-        if msg is not None and (source_stream == None or source_stream == 'none'):
+        if msg is not None and (source_stream is None or source_stream == 'none'):
+            # Check if text should be filtered
+            if self.should_filter_text(msg['text']):
+                logger.info("%i) (%s) %s -> %s [FILTERED] %s" % ( id, msg['language'], self.timedelta_to_webvtt(str(datetime.timedelta(seconds=float(msg['start'])))) ,  self.timedelta_to_webvtt(str(datetime.timedelta(seconds=float(msg['end'])))), msg['text']))
+                return  # Skip sending this subtitle
+
             logger.info("%i) (%s) %s -> %s %s" % ( id, msg['language'], self.timedelta_to_webvtt(str(datetime.timedelta(seconds=float(msg['start'])))) ,  self.timedelta_to_webvtt(str(datetime.timedelta(seconds=float(msg['end'])))), msg['text']))
             self.connection.send(json.dumps(msg))
 
@@ -183,9 +284,15 @@ class ServerProcessor:
                     if(report_language != args.source_language):
                         msg['language'] = report_language
                         msg['text'] = self.translate_text(id, org_txt, source_language, msg['language'])
+
+                        # Check if translated text should be filtered
+                        if self.should_filter_text(msg['text']):
+                            logger.info("%i) (%s) %s -> %s [FILTERED] %s" % ( id, msg['language'],  self.timedelta_to_webvtt(str(datetime.timedelta(seconds=float(msg['start'])))) ,  self.timedelta_to_webvtt(str(datetime.timedelta(seconds=float(msg['end'])))), msg['text']))
+                            continue  # Skip sending this translated subtitle
+
                         self.connection.send(json.dumps(msg))
                         if(report_language == 'en'):
-                            #switch to translation to english, for non-english to non-english, going to english works 
+                            #switch to translation to english, for non-english to non-english, going to english works
                             source_language = 'en'
                             msg['text'] = self.remove_non_english_chars(msg['text'])
                             org_txt = msg['text']

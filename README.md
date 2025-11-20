@@ -33,6 +33,39 @@ It can also run in standalone mode and pull in an RTMP stream using ffmpeg
 |REPORT_LANGUAGES |   en| Languages to report back to WSE|
 |LIBRETRANSLATE_HOST | localhost| Host name of the LibreTranslate service |
 |LIBRETRANSLATE_PORT| 5000 | Port of the LibreTranslate service |
+|FILTER_FILE | (none) | Path to JSON file containing strings to filter from subtitles. Subtitles containing any of these strings will not be streamed. |
+
+### Subtitle Filtering
+
+You can filter out subtitles containing specific strings by using a filter file. When a subtitle line contains any of the filtered strings (case-insensitive), it will not be streamed to clients.
+
+#### Setting up filters
+
+1. Create a `filter.json` file with the following format:
+```json
+{
+  "filters": [
+    "profanity",
+    "unwanted phrase",
+    "advertisement",
+    "spam"
+  ]
+}
+```
+
+2. Run the server with the `--filter-file` argument:
+```bash
+python whisper_online_server.py --filter-file /path/to/filter.json
+```
+
+Or set the environment variable in docker-compose:
+```yaml
+environment:
+  - FILTER_FILE=/app/filter.json
+```
+
+**Note:** An example filter file is provided as `filter.json.example`. Filtering applies to both source language subtitles and translated subtitles. Filtered subtitles are logged with a `[FILTERED]` tag for monitoring purposes.
+
 ### JSON
 
 The service returns a json object in the format to the websocket

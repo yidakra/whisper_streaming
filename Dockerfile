@@ -31,6 +31,7 @@ COPY *.py .
 COPY samples_jfk.wav .
 COPY entrypoint.sh .
 COPY LICENSE.txt .
+COPY filter.json* .
 
 EXPOSE 3000
 

@@ -1,0 +1,8 @@
+{
+  "filters": [
+    "profanity",
+    "unwanted phrase",
+    "advertisement",
+    "spam"
+  ]
+}

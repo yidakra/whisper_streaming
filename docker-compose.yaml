@@ -31,6 +31,7 @@ services:
             # - MODEL=large-v3-turbo
             # - USE_GPU=True
             # - FP16=true
+            # - FILTER_FILE=/app/filter.json # Optional: path to JSON file with subtitle filters
         ports:
             - 3000:3000
         volumes:
